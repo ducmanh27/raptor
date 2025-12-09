@@ -10,6 +10,7 @@
 #include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/event_groups.h"
 #include "esp_netif.h"
 #include "esp_eth.h"
 #include "esp_event.h"
@@ -17,7 +18,23 @@
 #include "ethernet_init.h"
 #include "sdkconfig.h"
 #include "driver/gpio.h"
-static const char *TAG = "eth_example";
+#include "lwip/err.h"
+#include "lwip/sockets.h"
+#include "lwip/sys.h"
+#include <lwip/netdb.h>
+
+static const char *TAG = "eth_tcp_server";
+#define STATIC_IP_ADDR "192.168.49.53"
+#define STATIC_NETMASK "255.255.255.0"
+#define STATIC_GATEWAY "192.168.49.1"
+#define TCP_SERVER_PORT 8888
+#define KEEPALIVE_IDLE 5
+#define KEEPALIVE_INTERVAL 5
+#define KEEPALIVE_COUNT 3
+
+// Event group để đồng bộ khi Ethernet có IP
+static EventGroupHandle_t eth_event_group;
+const int ETH_CONNECTED_BIT = BIT0;
 
 /** Event handler for Ethernet events */
 static void eth_event_handler(void *arg, esp_event_base_t event_base,
@@ -61,10 +78,136 @@ static void got_ip_event_handler(void *arg, esp_event_base_t event_base,
     ESP_LOGI(TAG, "ETHMASK:" IPSTR, IP2STR(&ip_info->netmask));
     ESP_LOGI(TAG, "ETHGW:" IPSTR, IP2STR(&ip_info->gw));
     ESP_LOGI(TAG, "~~~~~~~~~~~");
+
+    // Set bit để báo Ethernet đã có IP
+    xEventGroupSetBits(eth_event_group, ETH_CONNECTED_BIT);
+}
+
+
+static void tcp_server_task(void *pvParameters)
+{
+    char rx_buffer[128];
+    char addr_str[128];
+    int addr_family = AF_INET;
+    int ip_protocol = 0;
+    int keepAlive = 1;
+    int keepIdle = KEEPALIVE_IDLE;
+    int keepInterval = KEEPALIVE_INTERVAL;
+    int keepCount = KEEPALIVE_COUNT;
+    
+    // Đợi Ethernet có IP
+    ESP_LOGI(TAG, "Waiting for Ethernet connection...");
+    xEventGroupWaitBits(eth_event_group, ETH_CONNECTED_BIT, false, true, portMAX_DELAY);
+    ESP_LOGI(TAG, "Ethernet connected! Starting TCP server...");
+
+    while (1) {
+        struct sockaddr_storage dest_addr;
+
+        if (addr_family == AF_INET) {
+            struct sockaddr_in *dest_addr_ip4 = (struct sockaddr_in *)&dest_addr;
+            dest_addr_ip4->sin_addr.s_addr = htonl(INADDR_ANY);
+            dest_addr_ip4->sin_family = AF_INET;
+            dest_addr_ip4->sin_port = htons(TCP_SERVER_PORT);
+            ip_protocol = IPPROTO_IP;
+        }
+
+        int listen_sock = socket(addr_family, SOCK_STREAM, ip_protocol);
+        if (listen_sock < 0) {
+            ESP_LOGE(TAG, "Unable to create socket: errno %d", errno);
+            break;
+        }
+        
+        int opt = 1;
+        setsockopt(listen_sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+        ESP_LOGI(TAG, "Socket created");
+
+        int err = bind(listen_sock, (struct sockaddr *)&dest_addr, sizeof(dest_addr));
+        if (err != 0) {
+            ESP_LOGE(TAG, "Socket unable to bind: errno %d", errno);
+            ESP_LOGE(TAG, "IPPROTO: %d", addr_family);
+            goto CLEAN_UP;
+        }
+        ESP_LOGI(TAG, "Socket bound, port %d", TCP_SERVER_PORT);
+
+        err = listen(listen_sock, 1);
+        if (err != 0) {
+            ESP_LOGE(TAG, "Error occurred during listen: errno %d", errno);
+            goto CLEAN_UP;
+        }
+
+        ESP_LOGI(TAG, "TCP Server listening on %s:%d", STATIC_IP_ADDR, TCP_SERVER_PORT);
+
+        while (1) {
+            struct sockaddr_storage source_addr;
+            socklen_t addr_len = sizeof(source_addr);
+            int sock = accept(listen_sock, (struct sockaddr *)&source_addr, &addr_len);
+            if (sock < 0) {
+                ESP_LOGE(TAG, "Unable to accept connection: errno %d", errno);
+                break;
+            }
+
+            // Set tcp keepalive option
+            setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, &keepAlive, sizeof(int));
+            setsockopt(sock, IPPROTO_TCP, TCP_KEEPIDLE, &keepIdle, sizeof(int));
+            setsockopt(sock, IPPROTO_TCP, TCP_KEEPINTVL, &keepInterval, sizeof(int));
+            setsockopt(sock, IPPROTO_TCP, TCP_KEEPCNT, &keepCount, sizeof(int));
+
+            // Convert ip address to string
+            if (source_addr.ss_family == PF_INET) {
+                inet_ntoa_r(((struct sockaddr_in *)&source_addr)->sin_addr, addr_str, sizeof(addr_str) - 1);
+            }
+
+            ESP_LOGI(TAG, "Socket accepted from IP:%s", addr_str);
+
+            // Gửi welcome message
+            const char *welcome_msg = "Welcome to WT32-ETH01 TCP Server!\r\n";
+            send(sock, welcome_msg, strlen(welcome_msg), 0);
+
+            while (1) {
+                int len = recv(sock, rx_buffer, sizeof(rx_buffer) - 1, 0);
+                
+                if (len < 0) {
+                    ESP_LOGE(TAG, "recv failed: errno %d", errno);
+                    break;
+                } else if (len == 0) {
+                    ESP_LOGI(TAG, "Connection closed");
+                    break;
+                } else {
+                    rx_buffer[len] = 0; // Null-terminate
+                    ESP_LOGI(TAG, "Received %d bytes: %s", len, rx_buffer);
+
+                    // Echo back
+                    int to_write = len;
+                    while (to_write > 0) {
+                        int written = send(sock, rx_buffer + (len - to_write), to_write, 0);
+                        if (written < 0) {
+                            ESP_LOGE(TAG, "Error occurred during sending: errno %d", errno);
+                            goto CLIENT_CLEANUP;
+                        }
+                        to_write -= written;
+                    }
+                }
+            }
+
+CLIENT_CLEANUP:
+            shutdown(sock, 0);
+            close(sock);
+            ESP_LOGI(TAG, "Client disconnected");
+        }
+
+CLEAN_UP:
+        close(listen_sock);
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+    
+    vTaskDelete(NULL);
 }
 
 void app_main(void)
 {
+    eth_event_group = xEventGroupCreate();
+
     // Enable external oscillator for LAN8720A (GPIO 16)
     // GPIO 16 is pulled down at boot to allow IO0 strapping
     ESP_ERROR_CHECK(gpio_set_direction(GPIO_NUM_16, GPIO_MODE_OUTPUT));
@@ -85,48 +228,33 @@ void app_main(void)
     esp_netif_t *eth_netifs[eth_port_cnt];
     esp_eth_netif_glue_handle_t eth_netif_glues[eth_port_cnt];
 
-    // Create instance(s) of esp-netif for Ethernet(s)
-    if (eth_port_cnt == 1) {
-        // Use ESP_NETIF_DEFAULT_ETH when just one Ethernet interface is used and you don't need to modify
-        // default esp-netif configuration parameters.
-        esp_netif_config_t cfg = ESP_NETIF_DEFAULT_ETH();
-        eth_netifs[0] = esp_netif_new(&cfg);
-        eth_netif_glues[0] = esp_eth_new_netif_glue(eth_handles[0]);
-        // Attach Ethernet driver to TCP/IP stack
-        ESP_ERROR_CHECK(esp_netif_attach(eth_netifs[0], eth_netif_glues[0]));
-    } else {
-        // Use ESP_NETIF_INHERENT_DEFAULT_ETH when multiple Ethernet interfaces are used and so you need to modify
-        // esp-netif configuration parameters for each interface (name, priority, etc.).
-        esp_netif_inherent_config_t esp_netif_config = ESP_NETIF_INHERENT_DEFAULT_ETH();
-        esp_netif_config_t cfg_spi = {
-            .base = &esp_netif_config,
-            .stack = ESP_NETIF_NETSTACK_DEFAULT_ETH
-        };
-        char if_key_str[10];
-        char if_desc_str[10];
-        char num_str[3];
-        for (int i = 0; i < eth_port_cnt; i++) {
-            itoa(i, num_str, 10);
-            strcat(strcpy(if_key_str, "ETH_"), num_str);
-            strcat(strcpy(if_desc_str, "eth"), num_str);
-            esp_netif_config.if_key = if_key_str;
-            esp_netif_config.if_desc = if_desc_str;
-            esp_netif_config.route_prio -= i*5;
-            eth_netifs[i] = esp_netif_new(&cfg_spi);
-            eth_netif_glues[i] = esp_eth_new_netif_glue(eth_handles[i]);
-            // Attach Ethernet driver to TCP/IP stack
-            ESP_ERROR_CHECK(esp_netif_attach(eth_netifs[i], eth_netif_glues[i]));
-        }
-    }
+    // Use ESP_NETIF_DEFAULT_ETH when just one Ethernet interface is used and you don't need to modify
+    // default esp-netif configuration parameters.
+    esp_netif_config_t cfg = ESP_NETIF_DEFAULT_ETH();
+    eth_netifs[0] = esp_netif_new(&cfg);
+    eth_netif_glues[0] = esp_eth_new_netif_glue(eth_handles[0]);
+
+    esp_netif_ip_info_t ip_info;
+    ip_info.ip.addr = esp_ip4addr_aton(STATIC_IP_ADDR);
+    ip_info.netmask.addr = esp_ip4addr_aton(STATIC_NETMASK);
+    ip_info.gw.addr = esp_ip4addr_aton(STATIC_GATEWAY);
+
+    // Cấu hình IP tĩnh cho giao diện Ethernet
+    ESP_ERROR_CHECK(esp_netif_dhcpc_stop(eth_netifs[0]));  // Dừng DHCP Client
+    ESP_ERROR_CHECK(esp_netif_set_ip_info(eth_netifs[0], &ip_info));
+
+    // Attach Ethernet driver to TCP/IP stack
+    ESP_ERROR_CHECK(esp_netif_attach(eth_netifs[0], eth_netif_glues[0]));
+    
 
     // Register user defined event handlers
     ESP_ERROR_CHECK(esp_event_handler_register(ETH_EVENT, ESP_EVENT_ANY_ID, &eth_event_handler, NULL));
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_ETH_GOT_IP, &got_ip_event_handler, NULL));
 
     // Start Ethernet driver state machine
-    for (int i = 0; i < eth_port_cnt; i++) {
-        ESP_ERROR_CHECK(esp_eth_start(eth_handles[i]));
-    }
+    ESP_ERROR_CHECK(esp_eth_start(eth_handles[0]));
+
+    xTaskCreate(tcp_server_task, "tcp_server", 4096, NULL, 5, NULL);
 
 #if CONFIG_EXAMPLE_ETH_DEINIT_AFTER_S >= 0
     // For demonstration purposes, wait and then deinit Ethernet network
