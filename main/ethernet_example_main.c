@@ -22,6 +22,9 @@
 #include "lwip/sockets.h"
 #include "lwip/sys.h"
 #include <lwip/netdb.h>
+#include "esp_mac.h"
+#include "esp_wifi.h"
+#include "nvs_flash.h"
 
 static const char *TAG = "eth_tcp_server";
 #define STATIC_IP_ADDR "192.168.49.53"
@@ -31,6 +34,11 @@ static const char *TAG = "eth_tcp_server";
 #define KEEPALIVE_IDLE 5
 #define KEEPALIVE_INTERVAL 5
 #define KEEPALIVE_COUNT 3
+
+#define WIFI_SSID      "MTB-052"
+#define WIFI_PASSWORD  "12345687"
+#define WIFI_CHANNEL   1
+#define WIFI_MAX_CONN  5
 
 // Event group để đồng bộ khi Ethernet có IP
 static EventGroupHandle_t eth_event_group;
@@ -81,6 +89,51 @@ static void got_ip_event_handler(void *arg, esp_event_base_t event_base,
 
     // Set bit để báo Ethernet đã có IP
     xEventGroupSetBits(eth_event_group, ETH_CONNECTED_BIT);
+}
+
+static void wifi_event_handler(void* arg, esp_event_base_t event_base,
+                                    int32_t event_id, void* event_data)
+{
+    if (event_id == WIFI_EVENT_AP_STACONNECTED) {
+        wifi_event_ap_staconnected_t* event = (wifi_event_ap_staconnected_t*) event_data;
+        ESP_LOGI(TAG, "station "MACSTR" join, AID=%d",
+                 MAC2STR(event->mac), event->aid);
+    } else if (event_id == WIFI_EVENT_AP_STADISCONNECTED) {
+        wifi_event_ap_stadisconnected_t* event = (wifi_event_ap_stadisconnected_t*) event_data;
+        ESP_LOGI(TAG, "station "MACSTR" leave, AID=%d, reason=%d",
+                 MAC2STR(event->mac), event->aid, event->reason);
+    }
+}
+
+static void wifi_init_softap(void)
+{
+    ESP_LOGI(TAG, "Starting WiFi SoftAP...");
+
+    esp_netif_create_default_wifi_ap();
+
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+
+    wifi_config_t wifi_config = {
+        .ap = {
+            .ssid = WIFI_SSID,
+            .ssid_len = strlen(WIFI_SSID),
+            .channel = WIFI_CHANNEL,
+            .password = WIFI_PASSWORD,
+            .max_connection = WIFI_MAX_CONN,
+            .authmode = WIFI_AUTH_WPA2_PSK,
+        },
+    };
+
+    if (strlen(WIFI_PASSWORD) == 0)
+        wifi_config.ap.authmode = WIFI_AUTH_OPEN;
+
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &wifi_config));
+    ESP_ERROR_CHECK(esp_wifi_start());
+
+    ESP_LOGI(TAG, "wifi_init_softap finished: SSID=%s PASS=%s channel:%d",
+             WIFI_SSID, WIFI_PASSWORD, WIFI_CHANNEL);
 }
 
 
@@ -206,6 +259,10 @@ CLEAN_UP:
 
 void app_main(void)
 {
+    // Init NVS (needed for WiFi)
+    ESP_ERROR_CHECK(nvs_flash_init());
+
+
     eth_event_group = xEventGroupCreate();
 
     // Enable external oscillator for LAN8720A (GPIO 16)
@@ -250,26 +307,11 @@ void app_main(void)
     // Register user defined event handlers
     ESP_ERROR_CHECK(esp_event_handler_register(ETH_EVENT, ESP_EVENT_ANY_ID, &eth_event_handler, NULL));
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_ETH_GOT_IP, &got_ip_event_handler, NULL));
-
+    ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL));
     // Start Ethernet driver state machine
     ESP_ERROR_CHECK(esp_eth_start(eth_handles[0]));
 
+    wifi_init_softap();
     xTaskCreate(tcp_server_task, "tcp_server", 4096, NULL, 5, NULL);
 
-#if CONFIG_EXAMPLE_ETH_DEINIT_AFTER_S >= 0
-    // For demonstration purposes, wait and then deinit Ethernet network
-    vTaskDelay(pdMS_TO_TICKS(CONFIG_EXAMPLE_ETH_DEINIT_AFTER_S * 1000));
-    ESP_LOGI(TAG, "stop and deinitialize Ethernet network...");
-    // Stop Ethernet driver state machine and destroy netif
-    for (int i = 0; i < eth_port_cnt; i++) {
-        ESP_ERROR_CHECK(esp_eth_stop(eth_handles[i]));
-        ESP_ERROR_CHECK(esp_eth_del_netif_glue(eth_netif_glues[i]));
-        esp_netif_destroy(eth_netifs[i]);
-    }
-    esp_netif_deinit();
-    ESP_ERROR_CHECK(example_eth_deinit(eth_handles, eth_port_cnt));
-    ESP_ERROR_CHECK(esp_event_handler_unregister(IP_EVENT, IP_EVENT_ETH_GOT_IP, got_ip_event_handler));
-    ESP_ERROR_CHECK(esp_event_handler_unregister(ETH_EVENT, ESP_EVENT_ANY_ID, eth_event_handler));
-    ESP_ERROR_CHECK(esp_event_loop_delete_default());
-#endif // EXAMPLE_ETH_DEINIT_AFTER_S > 0
 }
