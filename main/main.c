@@ -6,24 +6,31 @@
 
 #include <stdio.h>
 #include <string.h>
+
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/event_groups.h"
+#include "freertos/queue.h"
+
+#include "driver/gpio.h"
+
+#include "nvs_flash.h"
 #include "esp_netif.h"
 #include "esp_eth.h"
 #include "esp_event.h"
 #include "esp_log.h"
-#include "ethernet_init.h"
-#include "sdkconfig.h"
-#include "driver/gpio.h"
+#include "esp_mac.h"
+
 #include "lwip/err.h"
 #include "lwip/sockets.h"
 #include "lwip/sys.h"
 #include <lwip/netdb.h>
-#include "esp_mac.h"
-#include "nvs_flash.h"
+
+#include "ethernet_init.h"
 #include "wifi_init.h"
+#include "sdkconfig.h"
 #include "network_config.h"
+#include "bridge_core.h"
 
 static const char *TAG = "main";
 
@@ -33,6 +40,9 @@ const int ETH_CONNECTED_BIT = BIT0;
 static EventGroupHandle_t wifi_event_group;
 const int WIFI_READY_BIT = BIT1;
 
+// Global bridge state
+bridge_state_t g_bridge;
+
 void wifi_ap_ready_handler(void* arg, esp_event_base_t event_base,
                            int32_t event_id, void* event_data) {
     if (event_id == WIFI_EVENT_AP_START) {
@@ -41,13 +51,10 @@ void wifi_ap_ready_handler(void* arg, esp_event_base_t event_base,
     }
 }
 
-
-/** Event handler for Ethernet events */
 static void eth_event_handler(void *arg, esp_event_base_t event_base,
                               int32_t event_id, void *event_data)
 {
     uint8_t mac_addr[6] = {0};
-    /* we can get the ethernet driver handle from event data */
     esp_eth_handle_t eth_handle = *(esp_eth_handle_t *)event_data;
 
     switch (event_id) {
@@ -71,7 +78,6 @@ static void eth_event_handler(void *arg, esp_event_base_t event_base,
     }
 }
 
-/** Event handler for IP_EVENT_ETH_GOT_IP */
 static void got_ip_event_handler(void *arg, esp_event_base_t event_base,
                                  int32_t event_id, void *event_data)
 {
@@ -85,32 +91,88 @@ static void got_ip_event_handler(void *arg, esp_event_base_t event_base,
     ESP_LOGI(TAG, "ETHGW:" IPSTR, IP2STR(&ip_info->gw));
     ESP_LOGI(TAG, "~~~~~~~~~~~");
 
-    // Set bit để báo Ethernet đã có IP
     xEventGroupSetBits(eth_event_group, ETH_CONNECTED_BIT);
 }
 
-int write_data(int sock, char *rx_buffer, int len) {
-    int to_write = len;
+// ========== ETHERNET RX TASK (Nhận từ Ethernet Client) ==========
+static void ethernet_rx_task(void *pvParameters) {
+    int sock = (int)pvParameters;
+    char rx_buffer[256];
+    const char *TASK_TAG = "eth_rx";
     
-    while (to_write > 0) {
-        int written = send(sock, rx_buffer + (len - to_write), to_write, 0);
+    ESP_LOGI(TASK_TAG, "Ethernet RX task started for socket %d", sock);
+    
+    while (1) {
+        int len = recv(sock, rx_buffer, sizeof(rx_buffer) - 1, 0);
         
-        if (written < 0) {
-            ESP_LOGE(TAG, "Error occurred during sending: errno %d", errno);
-            return -1;
+        if (len < 0) {
+            ESP_LOGE(TASK_TAG, "recv failed: errno %d", errno);
+            break;
         }
         
-        to_write -= written;
+        if (len == 0) {
+            ESP_LOGI(TASK_TAG, "Ethernet client disconnected");
+            break;
+        }
+        
+        rx_buffer[len] = 0;
+        ESP_LOGI(TASK_TAG, "[ETH->WiFi] Received %d bytes: %s", len, rx_buffer);
+        
+        // Gửi vào queue để broadcast đến WiFi clients
+        if (bridge_send_to_wifi(&g_bridge, (uint8_t*)rx_buffer, len, sock) != 0) {
+            ESP_LOGW(TASK_TAG, "Failed to send to WiFi queue");
+        }
     }
     
-    return 0;
+    // Cleanup
+    bridge_clear_ethernet_client(&g_bridge);
+    close(sock);
+    ESP_LOGI(TASK_TAG, "Ethernet RX task ended");
+    vTaskDelete(NULL);
 }
 
+// ========== ETHERNET TX TASK (Gửi đến Ethernet Client) ==========
+static void ethernet_tx_task(void *pvParameters) {
+    int sock = (int)pvParameters;
+    bridge_message_t msg;
+    const char *TASK_TAG = "eth_tx";
+    
+    ESP_LOGI(TASK_TAG, "Ethernet TX task started for socket %d", sock);
+    
+    while (1) {
+        // Đợi message từ WiFi
+        if (xQueueReceive(g_bridge.queue_wifi_to_eth, &msg, portMAX_DELAY) == pdTRUE) {
+            ESP_LOGI(TASK_TAG, "[WiFi->ETH] Forwarding %d bytes to Ethernet client", msg.len);
+            
+            // Gửi đến Ethernet client
+            int to_write = msg.len;
+            uint8_t *ptr = msg.data;
+            
+            while (to_write > 0) {
+                int written = send(sock, ptr, to_write, 0);
+                
+                if (written < 0) {
+                    ESP_LOGE(TASK_TAG, "send failed: errno %d", errno);
+                    goto EXIT;
+                }
+                
+                to_write -= written;
+                ptr += written;
+            }
+            
+            ESP_LOGI(TASK_TAG, "Successfully sent %d bytes to Ethernet client", msg.len);
+        }
+    }
+    
+EXIT:
+    ESP_LOGI(TASK_TAG, "Ethernet TX task ended");
+    vTaskDelete(NULL);
+}
 
+// ========== ETHERNET SERVER TASK ==========
 static void tcp_server_ethernet_task(void *pvParameters)
 {
-    const char *TASK_TAG = "ethernet_tcp_server";
-    char rx_buffer[128];
+    const char *TASK_TAG = "eth_server";
     char addr_str[128];
     int addr_family = AF_INET;
     int ip_protocol = 0;
@@ -119,127 +181,214 @@ static void tcp_server_ethernet_task(void *pvParameters)
     int keepInterval = KEEPALIVE_INTERVAL;
     int keepCount = KEEPALIVE_COUNT;
     
-    // Đợi Ethernet có IP
-    ESP_LOGI(TASK_TAG, "[Ethernet] Waiting for Ethernet connection...");
+    ESP_LOGI(TASK_TAG, "Waiting for Ethernet connection...");
     xEventGroupWaitBits(eth_event_group, ETH_CONNECTED_BIT, false, true, portMAX_DELAY);
-    ESP_LOGI(TASK_TAG, "[Ethernet] Ethernet connected! Starting TCP server...");
+    ESP_LOGI(TASK_TAG, "Ethernet connected! Starting TCP server...");
 
     while (1) {
         struct sockaddr_storage dest_addr;
 
         if (addr_family == AF_INET) {
             struct sockaddr_in *dest_addr_ip4 = (struct sockaddr_in *)&dest_addr;
-            dest_addr_ip4->sin_addr.s_addr = htonl(INADDR_ANY);
+            dest_addr_ip4->sin_addr.s_addr = inet_addr(ETH_STATIC_IP);
             dest_addr_ip4->sin_family = AF_INET;
-            dest_addr_ip4->sin_port = htons(ETH_TCP_PORT);  // <--- SỬA DÒNG NÀY
+            dest_addr_ip4->sin_port = htons(ETH_TCP_PORT);
             ip_protocol = IPPROTO_IP;
         }
 
         int listen_sock = socket(addr_family, SOCK_STREAM, ip_protocol);
         if (listen_sock < 0) {
-            ESP_LOGE(TASK_TAG, "[Ethernet] Unable to create socket: errno %d", errno);
-            break;
+            ESP_LOGE(TASK_TAG, "Unable to create socket: errno %d", errno);
+            vTaskDelay(pdMS_TO_TICKS(5000));
+            continue;
         }
         
         int opt = 1;
         setsockopt(listen_sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
-        ESP_LOGI(TASK_TAG, "[Ethernet] Socket created");
-
         int err = bind(listen_sock, (struct sockaddr *)&dest_addr, sizeof(dest_addr));
         if (err != 0) {
-            ESP_LOGE(TASK_TAG, "[Ethernet] Socket unable to bind: errno %d", errno);
-            ESP_LOGE(TASK_TAG, "[Ethernet] IPPROTO: %d", addr_family);
-            goto CLEAN_UP;
+            ESP_LOGE(TASK_TAG, "Socket unable to bind: errno %d", errno);
+            close(listen_sock);
+            vTaskDelay(pdMS_TO_TICKS(5000));
+            continue;
         }
-        ESP_LOGI(TASK_TAG, "[Ethernet] Socket bound, port %d", ETH_TCP_PORT);
+        
+        ESP_LOGI(TASK_TAG, "Socket bound to port %d", ETH_TCP_PORT);
 
         err = listen(listen_sock, 1);
         if (err != 0) {
-            ESP_LOGE(TASK_TAG, "[Ethernet] Error occurred during listen: errno %d", errno);
-            goto CLEAN_UP;
+            ESP_LOGE(TASK_TAG, "listen failed: errno %d", errno);
+            close(listen_sock);
+            vTaskDelay(pdMS_TO_TICKS(5000));
+            continue;
         }
 
-        ESP_LOGI(TASK_TAG, "TCP Server listening on %s:%d", 
-                 ETH_STATIC_IP, ETH_TCP_PORT);
+        ESP_LOGI(TASK_TAG, "TCP Server listening on %s:%d", ETH_STATIC_IP, ETH_TCP_PORT);
 
-        while (1) {
-            struct sockaddr_storage source_addr;
-            socklen_t addr_len = sizeof(source_addr);
-            int sock = accept(listen_sock, (struct sockaddr *)&source_addr, &addr_len);
-            if (sock < 0) {
-                ESP_LOGE(TAG, "[Ethernet] Unable to accept connection: errno %d", errno);
-                break;
-            }
-
-            // Set tcp keepalive option
-            setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, &keepAlive, sizeof(int));
-            setsockopt(sock, IPPROTO_TCP, TCP_KEEPIDLE, &keepIdle, sizeof(int));
-            setsockopt(sock, IPPROTO_TCP, TCP_KEEPINTVL, &keepInterval, sizeof(int));
-            setsockopt(sock, IPPROTO_TCP, TCP_KEEPCNT, &keepCount, sizeof(int));
-
-            // Convert ip address to string
-            if (source_addr.ss_family == PF_INET) {
-                inet_ntoa_r(((struct sockaddr_in *)&source_addr)->sin_addr, addr_str, sizeof(addr_str) - 1);
-            }
-
-            ESP_LOGI(TASK_TAG, "[Ethernet] Socket accepted from IP:%s", addr_str);
-
-            while (1) {
-                int len = recv(sock, rx_buffer, sizeof(rx_buffer) - 1, 0);
-                
-                if (len < 0) {
-                    ESP_LOGE(TASK_TAG, "[Ethernet] recv failed: errno %d", errno);
-                    break;
-                } else if (len == 0) {
-                    ESP_LOGI(TASK_TAG, "[Ethernet] Connection closed");
-                    break;
-                } else {
-                    rx_buffer[len] = 0; // Null-terminate
-                    ESP_LOGI(TASK_TAG, "[Ethernet] Received %d bytes: %s", len, rx_buffer);
-
-                    // test echo back
-                    // if (write_data(sock, rx_buffer, len) < 0) {
-                    //     ESP_LOGE(TAG, "Failed to send data back, cleaning up...");
-                    //     goto CLIENT_CLEANUP;
-                    // }
-                }
-            }
-
-// CLIENT_CLEANUP:
-//             shutdown(sock, 0);
-//             close(sock);
-//             ESP_LOGI(TAG, "Client disconnected");
+        // Accept loop - chỉ accept 1 client
+        struct sockaddr_storage source_addr;
+        socklen_t addr_len = sizeof(source_addr);
+        int sock = accept(listen_sock, (struct sockaddr *)&source_addr, &addr_len);
+        
+        if (sock < 0) {
+            ESP_LOGE(TASK_TAG, "accept failed: errno %d", errno);
+            close(listen_sock);
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            continue;
         }
 
-CLEAN_UP:
-        close(listen_sock);
+        // Set keepalive
+        setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, &keepAlive, sizeof(int));
+        setsockopt(sock, IPPROTO_TCP, TCP_KEEPIDLE, &keepIdle, sizeof(int));
+        setsockopt(sock, IPPROTO_TCP, TCP_KEEPINTVL, &keepInterval, sizeof(int));
+        setsockopt(sock, IPPROTO_TCP, TCP_KEEPCNT, &keepCount, sizeof(int));
+
+        if (source_addr.ss_family == PF_INET) {
+            inet_ntoa_r(((struct sockaddr_in *)&source_addr)->sin_addr, addr_str, sizeof(addr_str) - 1);
+        }
+
+        ESP_LOGI(TASK_TAG, "Ethernet client connected from: %s", addr_str);
+        
+        // Đăng ký Ethernet client
+        bridge_set_ethernet_client(&g_bridge, sock);
+        
+        // Tạo 2 tasks: RX và TX
+        xTaskCreate(ethernet_rx_task, "eth_rx", 4096, (void*)sock, 5, NULL);
+        xTaskCreate(ethernet_tx_task, "eth_tx", 4096, (void*)sock, 5, NULL);
+        
+        // Đợi client disconnect (các task sẽ tự cleanup)
+        // Server sẽ close listen socket và chờ client mới
         vTaskDelay(pdMS_TO_TICKS(1000));
+        
+        close(listen_sock);
+        ESP_LOGI(TASK_TAG, "Ethernet client disconnected, waiting for new connection...");
+        vTaskDelay(pdMS_TO_TICKS(2000));
     }
     
     vTaskDelete(NULL);
 }
 
-// TCP Server Task cho WiFi
+// ========== WIFI CLIENT HANDLER TASK ==========
+static void wifi_client_handler_task(void *pvParameters) {
+    int sock = (int)pvParameters;
+    char rx_buffer[256];
+    const char *TASK_TAG = "wifi_client";
+    int keepAlive = 1;
+    
+    setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, &keepAlive, sizeof(int));
+    
+    // Đăng ký client vào bridge
+    if (bridge_register_wifi_client(&g_bridge, sock) != 0) {
+        ESP_LOGE(TASK_TAG, "Failed to register WiFi client, closing connection");
+        close(sock);
+        vTaskDelete(NULL);
+        return;
+    }
+    
+    ESP_LOGI(TASK_TAG, "WiFi client handler started for socket %d", sock);
+    
+    while (1) {
+        int len = recv(sock, rx_buffer, sizeof(rx_buffer) - 1, 0);
+        
+        if (len < 0) {
+            ESP_LOGE(TASK_TAG, "recv failed: errno %d", errno);
+            break;
+        }
+
+        if (len == 0) {
+            ESP_LOGI(TASK_TAG, "WiFi client disconnected");
+            break;
+        }
+
+        rx_buffer[len] = 0;
+        ESP_LOGI(TASK_TAG, "[WiFi->ETH] Received %d bytes: %s", len, rx_buffer);
+        
+        // Gửi vào queue để forward đến Ethernet
+        if (bridge_send_to_ethernet(&g_bridge, (uint8_t*)rx_buffer, len, sock) != 0) {
+            ESP_LOGW(TASK_TAG, "Failed to send to Ethernet queue");
+        }
+    }
+    
+    // Cleanup
+    bridge_unregister_wifi_client(&g_bridge, sock);
+    close(sock);
+    ESP_LOGI(TASK_TAG, "WiFi client handler ended for socket %d", sock);
+    vTaskDelete(NULL);
+}
+
+// ========== WIFI BROADCAST TASK ==========
+static void wifi_broadcast_task(void *pvParameters) {
+    bridge_message_t msg;
+    const char *TASK_TAG = "wifi_broadcast";
+    
+    ESP_LOGI(TASK_TAG, "WiFi broadcast task started");
+    
+    while (1) {
+        // Đợi message từ Ethernet
+        if (xQueueReceive(g_bridge.queue_eth_to_wifi, &msg, portMAX_DELAY) == pdTRUE) {
+            ESP_LOGI(TASK_TAG, "[ETH->WiFi] Broadcasting %d bytes to all WiFi clients", msg.len);
+            
+            // Lấy mutex để access client list
+            if (xSemaphoreTake(g_bridge.wifi_clients.mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+                int sent_count = 0;
+                int failed_count = 0;
+                
+                // Broadcast đến tất cả WiFi clients
+                for (int i = 0; i < MAX_WIFI_CLIENTS; i++) {
+                    int sock = g_bridge.wifi_clients.sockets[i];
+                    if (sock != -1) {
+                        int to_write = msg.len;
+                        uint8_t *ptr = msg.data;
+                        
+                        while (to_write > 0) {
+                            int written = send(sock, ptr, to_write, 0);
+                            
+                            if (written < 0) {
+                                ESP_LOGE(TASK_TAG, "send failed to socket %d: errno %d", sock, errno);
+                                failed_count++;
+                                break;
+                            }
+                            
+                            to_write -= written;
+                            ptr += written;
+                        }
+                        
+                        if (to_write == 0) {
+                            sent_count++;
+                        }
+                    }
+                }
+                
+                xSemaphoreGive(g_bridge.wifi_clients.mutex);
+                
+                ESP_LOGI(TASK_TAG, "Broadcast complete: sent=%d, failed=%d, total_clients=%d", 
+                         sent_count, failed_count, g_bridge.wifi_clients.count);
+            } else {
+                ESP_LOGW(TASK_TAG, "Failed to acquire mutex for broadcast");
+            }
+        }
+    }
+    
+    vTaskDelete(NULL);
+}
+
+// ========== WIFI SERVER TASK ==========
 static void tcp_server_wifi_task(void *pvParameters)
 {
-    char rx_buffer[128];
-    char addr_str[128];
     int addr_family = AF_INET;
     int ip_protocol = 0;
     int keepAlive = 1;
     int keepIdle = KEEPALIVE_IDLE;
     int keepInterval = KEEPALIVE_INTERVAL;
     int keepCount = KEEPALIVE_COUNT;
+
+    const char *TASK_TAG = "wifi_server";
     
-    const char *TASK_TAG = "wifi_tcp_server";
-    
-    // Đợi WiFi SoftAP sẵn sàng
     ESP_LOGI(TASK_TAG, "Waiting for WiFi AP to start...");
     xEventGroupWaitBits(wifi_event_group, WIFI_READY_BIT, false, true, portMAX_DELAY);
     
-    // Đợi thêm 1 chút để đảm bảo interface hoàn toàn ready
-    vTaskDelay(pdMS_TO_TICKS(1000));
+    vTaskDelay(pdMS_TO_TICKS(500));
     ESP_LOGI(TASK_TAG, "WiFi AP ready! Starting TCP server...");
 
     while (1) {
@@ -260,13 +409,9 @@ static void tcp_server_wifi_task(void *pvParameters)
             continue;
         }
         
-        // Set socket options
         int opt = 1;
         setsockopt(listen_sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
-        ESP_LOGI(TASK_TAG, "Socket created");
-
-        // Bind socket vào địa chỉ WiFi AP
         int err = bind(listen_sock, (struct sockaddr *)&dest_addr, sizeof(dest_addr));
         if (err != 0) {
             ESP_LOGE(TASK_TAG, "Socket unable to bind: errno %d", errno);
@@ -274,80 +419,50 @@ static void tcp_server_wifi_task(void *pvParameters)
             vTaskDelay(pdMS_TO_TICKS(5000));
             continue;
         }
-        ESP_LOGI(TASK_TAG, "Socket bound to %s:%d", 
-                 WIFI_AP_IP, WIFI_TCP_PORT);
+        
+        ESP_LOGI(TASK_TAG, "Socket bound to %s:%d", WIFI_AP_IP, WIFI_TCP_PORT);
 
-        // Listen for connections
-        err = listen(listen_sock, 1);
+        err = listen(listen_sock, 5);  // Tăng backlog lên 5
         if (err != 0) {
-            ESP_LOGE(TASK_TAG, "Error occurred during listen: errno %d", errno);
+            ESP_LOGE(TASK_TAG, "listen failed: errno %d", errno);
             close(listen_sock);
             vTaskDelay(pdMS_TO_TICKS(5000));
             continue;
         }
 
-        ESP_LOGI(TASK_TAG, "WiFi TCP Server listening on %s:%d", 
-                 WIFI_AP_IP, WIFI_TCP_PORT);
+        ESP_LOGI(TASK_TAG, "WiFi TCP Server listening on %s:%d", WIFI_AP_IP, WIFI_TCP_PORT);
 
-        // Accept connections loop
+        // Accept loop - accept nhiều clients
         while (1) {
             struct sockaddr_storage source_addr;
             socklen_t addr_len = sizeof(source_addr);
             
             int sock = accept(listen_sock, (struct sockaddr *)&source_addr, &addr_len);
             if (sock < 0) {
-                ESP_LOGE(TASK_TAG, "Unable to accept connection: errno %d", errno);
+                ESP_LOGE(TASK_TAG, "accept failed: errno %d", errno);
                 break;
             }
 
-            // Set TCP keepalive options
+            // Set keepalive
             setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, &keepAlive, sizeof(int));
             setsockopt(sock, IPPROTO_TCP, TCP_KEEPIDLE, &keepIdle, sizeof(int));
             setsockopt(sock, IPPROTO_TCP, TCP_KEEPINTVL, &keepInterval, sizeof(int));
             setsockopt(sock, IPPROTO_TCP, TCP_KEEPCNT, &keepCount, sizeof(int));
-
-            // Convert client IP address to string
+            
+            char addr_str[128];
             if (source_addr.ss_family == PF_INET) {
                 inet_ntoa_r(((struct sockaddr_in *)&source_addr)->sin_addr, 
                            addr_str, sizeof(addr_str) - 1);
             }
 
-            ESP_LOGI(TASK_TAG, "[WiFi] Client connected from IP: %s", addr_str);
-
-            // Receive data loop
-            while (1) {
-                int len = recv(sock, rx_buffer, sizeof(rx_buffer) - 1, 0);
-                
-                if (len < 0) {
-                    ESP_LOGE(TASK_TAG, "recv failed: errno %d", errno);
-                    break;
-                } else if (len == 0) {
-                    ESP_LOGI(TASK_TAG, "[WiFi] Connection closed by client");
-                    break;
-                } else {
-                    rx_buffer[len] = 0; // Null-terminate
-                    ESP_LOGI(TASK_TAG, "[WiFi] Received %d bytes: %s", len, rx_buffer);
-
-                    // Echo back (tùy chọn)
-                    int to_write = len;
-                    while (to_write > 0) {
-                        int written = send(sock, rx_buffer + (len - to_write), to_write, 0);
-                        if (written < 0) {
-                            ESP_LOGE(TASK_TAG, "Error sending data: errno %d", errno);
-                            break;
-                        }
-                        to_write -= written;
-                    }
-                }
-            }
-
-            // Cleanup client connection
-            shutdown(sock, 0);
-            close(sock);
-            ESP_LOGI(TASK_TAG, "[WiFi] Client disconnected");
+            ESP_LOGI(TASK_TAG, "New WiFi client connected from: %s", addr_str);
+            
+            // Tạo task xử lý client
+            char task_name[32];
+            snprintf(task_name, sizeof(task_name), "wifi_cli_%d", sock);
+            xTaskCreate(wifi_client_handler_task, task_name, 4096, (void*)sock, 5, NULL);
         }
 
-        // Cleanup listening socket
         close(listen_sock);
         ESP_LOGI(TASK_TAG, "Restarting WiFi TCP server...");
         vTaskDelay(pdMS_TO_TICKS(1000));
@@ -356,41 +471,39 @@ static void tcp_server_wifi_task(void *pvParameters)
     vTaskDelete(NULL);
 }
 
-
+// ========== APP MAIN ==========
 void app_main(void)
 {
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-      ESP_ERROR_CHECK(nvs_flash_erase());
-      ret = nvs_flash_init();
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ret = nvs_flash_init();
     }
     ESP_ERROR_CHECK(ret);
+
+    // Initialize bridge
+    bridge_init(&g_bridge);
 
     eth_event_group = xEventGroupCreate();
     wifi_event_group = xEventGroupCreate();
 
-    // Enable external oscillator for LAN8720A (GPIO 16)
-    // GPIO 16 is pulled down at boot to allow IO0 strapping
+    // GPIO setup for Ethernet
     ESP_ERROR_CHECK(gpio_set_direction(GPIO_NUM_16, GPIO_MODE_OUTPUT));
     ESP_ERROR_CHECK(gpio_set_level(GPIO_NUM_16, 1));
-    vTaskDelay(pdMS_TO_TICKS(100)); // Wait for oscillator to stabilize
-    
+    vTaskDelay(pdMS_TO_TICKS(100));
     ESP_LOGI(TAG, "External oscillator enabled on GPIO 16");
+
     // Initialize Ethernet driver
     uint8_t eth_port_cnt = 0;
     esp_eth_handle_t *eth_handles;
     ESP_ERROR_CHECK(example_eth_init(&eth_handles, &eth_port_cnt));
 
-    // Initialize TCP/IP network interface aka the esp-netif (should be called only once in application)
     ESP_ERROR_CHECK(esp_netif_init());
-    // Create default event loop that running in background
     ESP_ERROR_CHECK(esp_event_loop_create_default());
 
     esp_netif_t *eth_netifs[eth_port_cnt];
     esp_eth_netif_glue_handle_t eth_netif_glues[eth_port_cnt];
 
-    // Use ESP_NETIF_DEFAULT_ETH when just one Ethernet interface is used and you don't need to modify
-    // default esp-netif configuration parameters.
     esp_netif_config_t cfg = ESP_NETIF_DEFAULT_ETH();
     eth_netifs[0] = esp_netif_new(&cfg);
     eth_netif_glues[0] = esp_eth_new_netif_glue(eth_handles[0]);
@@ -400,22 +513,19 @@ void app_main(void)
     ip_info.netmask.addr = esp_ip4addr_aton(ETH_NETMASK);
     ip_info.gw.addr = esp_ip4addr_aton(ETH_GATEWAY); 
 
-    // Cấu hình IP tĩnh cho giao diện Ethernet
-    ESP_ERROR_CHECK(esp_netif_dhcpc_stop(eth_netifs[0]));  // Dừng DHCP Client
+    ESP_ERROR_CHECK(esp_netif_dhcpc_stop(eth_netifs[0]));
     ESP_ERROR_CHECK(esp_netif_set_ip_info(eth_netifs[0], &ip_info));
-
-    // Attach Ethernet driver to TCP/IP stack
     ESP_ERROR_CHECK(esp_netif_attach(eth_netifs[0], eth_netif_glues[0]));
-    
 
-    // Register user defined event handlers
+    // Register event handlers
     ESP_ERROR_CHECK(esp_event_handler_register(ETH_EVENT, ESP_EVENT_ANY_ID, &eth_event_handler, NULL));
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_ETH_GOT_IP, &got_ip_event_handler, NULL));
     ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL));
     ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_AP_START, wifi_ap_ready_handler, NULL));
-    // Start Ethernet driver state machine
+
     ESP_ERROR_CHECK(esp_eth_start(eth_handles[0]));
 
+    // Initialize WiFi
     wifi_softap_config_t wifi_config = {
         .ssid = WIFI_SSID,
         .password = WIFI_PASSWORD,
@@ -425,13 +535,18 @@ void app_main(void)
         .gateway = WIFI_AP_GATEWAY,
         .netmask = WIFI_AP_NETMASK
     };
-    // Start WiFi SoftAP
     wifi_init_softap(&wifi_config);
 
+    // Start TCP servers
     xTaskCreate(tcp_server_ethernet_task, "tcp_eth_server", 4096, NULL, 5, NULL);
     xTaskCreate(tcp_server_wifi_task, "tcp_wifi_server", 4096, NULL, 5, NULL);
-    
-    ESP_LOGI(TAG, "Both TCP servers started");
+
+    // Start broadcast task
+    xTaskCreate(wifi_broadcast_task, "wifi_broadcast", 4096, NULL, 5, NULL);
+
+    ESP_LOGI(TAG, "===========================================");
+    ESP_LOGI(TAG, "Bridge/Gateway initialized successfully");
     ESP_LOGI(TAG, "Ethernet: %s:%d", ETH_STATIC_IP, ETH_TCP_PORT); 
     ESP_LOGI(TAG, "WiFi AP:  %s:%d", WIFI_AP_IP, WIFI_TCP_PORT); 
+    ESP_LOGI(TAG, "===========================================");
 }
