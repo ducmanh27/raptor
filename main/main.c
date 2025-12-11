@@ -453,7 +453,7 @@ static void tcp_server_wifi_task(void *pvParameters)
             // Tạo task xử lý client
             char task_name[32];
             snprintf(task_name, sizeof(task_name), "wifi_cli_%d", sock);
-            xTaskCreate(wifi_client_handler_task, task_name, 4096, (void*)sock, 5, NULL);
+            xTaskCreate(wifi_client_handler_task, task_name, 8192, (void*)sock, 5, NULL);
         }
 
         close(listen_sock);
@@ -531,11 +531,11 @@ void app_main(void)
     wifi_init_softap(&wifi_config);
 
     // Start TCP servers
-    xTaskCreate(tcp_server_ethernet_task, "tcp_eth_server", 4096, NULL, 5, NULL);
-    xTaskCreate(tcp_server_wifi_task, "tcp_wifi_server", 4096, NULL, 5, NULL);
+    xTaskCreate(tcp_server_ethernet_task, "tcp_eth_server", 8192, NULL, 5, NULL);
+    xTaskCreate(tcp_server_wifi_task, "tcp_wifi_server", 8192, NULL, 5, NULL);
 
     // Start broadcast task
-    xTaskCreate(wifi_broadcast_task, "wifi_broadcast", 4096, NULL, 5, NULL);
+    xTaskCreate(wifi_broadcast_task, "wifi_broadcast", 8192, NULL, 5, NULL);
 
     ESP_LOGI(TAG, "===========================================");
     ESP_LOGI(TAG, "Bridge/Gateway initialized successfully");
