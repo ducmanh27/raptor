@@ -6,16 +6,20 @@
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
 
+#ifndef MAX_MESSAGE_DATA_SIZE
+#define MAX_MESSAGE_DATA_SIZE 1024
+#endif
+
 // Message format for bridge communication
 typedef struct {
-    uint8_t data[256];      // Payload data
-    uint16_t len;           // Data length
-    int source_sock;        // Source socket (for tracing)
+    uint8_t data[MAX_MESSAGE_DATA_SIZE];        // Payload data
+    uint16_t len;                               // Data length
+    int source_sock;                            // Source socket (for tracing)
     enum {
         FROM_WIFI,
         FROM_ETHERNET
     } source;
-} bridge_message_t;
+} __attribute__((packed)) bridge_message_t;
 
 // Client registry for WiFi clients
 #define MAX_WIFI_CLIENTS 5

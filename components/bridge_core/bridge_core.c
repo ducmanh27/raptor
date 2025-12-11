@@ -4,7 +4,7 @@
 
 static const char *TAG = "bridge";
 
-#define QUEUE_LENGTH 10
+#define QUEUE_LENGTH 3
 #define QUEUE_TIMEOUT_MS 1000
 
 void bridge_init(bridge_state_t *bridge) {
