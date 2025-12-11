@@ -27,19 +27,19 @@ This project implements a **bidirectional bridge/gateway** between Ethernet and 
 ┌─────────────────────────────────────────────────────────────┐
 │                    ESP32 Gateway                            │
 │                                                             │
-│  WiFi Side (Multiple clients)    Ethernet Side (1 client)  │
-│  ┌─────────────────┐             ┌──────────────────┐      │
-│  │ WiFi Client 1   │             │                  │      │
-│  │ WiFi Client 2   │────────┐    │  Ethernet Client │      │
-│  │ WiFi Client 3   │        │    │                  │      │
-│  │      ...        │        │    │                  │      │
-│  └─────────────────┘        │    └──────────────────┘      │
-│         │                   │             │                │
-│         ▼                   ▼             ▼                │
-│  ┌─────────────┐      ┌─────────────┐  ┌──────────┐       │
-│  │  WiFi Task  │◄────►│   Bridge    │◄─►│ Eth Task │       │
-│  │  (Server)   │      │   Queues    │  │ (Server) │       │
-│  └─────────────┘      └─────────────┘  └──────────┘       │
+│  WiFi Side (Multiple clients)    Ethernet Side (1 client)   │
+│  ┌─────────────────┐             ┌──────────────────┐       │
+│  │ WiFi Client 1   │             │                  │       │
+│  │ WiFi Client 2   │────────┐    │  Ethernet Client │       │
+│  │ WiFi Client 3   │        │    │                  │       │
+│  │      ...        │        │    │                  │       │
+│  └─────────────────┘        │    └──────────────────┘       │
+│         │                   │             │                 │
+│         ▼                   ▼             ▼                 │
+│  ┌─────────────┐      ┌─────────────┐   ┌──────────┐        │
+│  │  WiFi Task  │◄────►│   Bridge    │◄─►│ Eth Task │        │
+│  │  (Server)   │      │   Queues    │   │ (Server) │        │
+│  └─────────────┘      └─────────────┘   └──────────┘        │
 │                                                             │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -162,9 +162,7 @@ nc 192.168.49.53 8888
 ```bash
 # Connect to WiFi AP: MTB-052 (password: 12345687)
 # Your device will get IP: 192.168.10.2 or higher
-
-# From WiFi device
-nc 192.168.10.1 9999
+# Windows: Dùng hercules terminal mở TCP Client đến 192.168.10.1 9999 và gửi dữ liệu
 ```
 
 **3. Test Bidirectional Communication:**
@@ -241,19 +239,18 @@ I (158366) wifi_broadcast: Broadcast complete: sent=1, failed=0, total_clients=1
 ```
 .
 ├── main/
-│   └── main.c                      # Main application, TCP servers
+│   ├── main.c                   # Main application, TCP servers
+│   └── network_config.h         # Centralized network configuration
 ├── components/
-│   ├── bridge_message/
-│   │   ├── bridge_message.h        # Bridge data structures
-│   │   └── bridge_message.c        # Bridge logic, queue management
-│   ├── network_config/
-│   │   └── network_config.h        # Centralized network configuration
+│   ├── bridge_core/
+│   │   ├── bridge_core.h        # Bridge data structures
+│   │   └── bridge_core.c        # Bridge logic, queue management
 │   ├── wifi_init/
 │   │   ├── wifi_init.h
-│   │   └── wifi_init.c             # WiFi SoftAP initialization
+│   │   └── wifi_init.c          # WiFi SoftAP initialization
 │   └── ethernet_init/
 │       ├── ethernet_init.h
-│       └── ethernet_init.c         # Ethernet driver initialization
+│       └── ethernet_init.c      # Ethernet driver initialization
 └── README.md
 ```
 
@@ -319,7 +316,7 @@ bridge_clear_ethernet_client(&g_bridge);
 
 ### Scalability
 
-To support more WiFi clients, edit `bridge_message.h`:
+To support more WiFi clients, edit `bridge_core.h`:
 ```c
 #define MAX_WIFI_CLIENTS 20  // Increase limit
 ```
@@ -342,7 +339,7 @@ MIT License
 
 Phan Duc Manh
 
-Date: 10/12/2025
+Date: 8/12/2025
 
 ## References
 

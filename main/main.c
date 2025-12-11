@@ -1,7 +1,7 @@
 /* 
  * Author: Phan Duc Manh
  * License: MIT License
- * Date: 10/12/2025
+ * Date: 8/12/2025
  */
 
 #include <stdio.h>
