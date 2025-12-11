@@ -106,7 +106,7 @@ send() to each WiFi Client
 
 ## Network Configuration
 
-Edit `components/network_config/network_config.h`:
+Edit `network_config.h`:
 
 ```c
 // Ethernet Configuration
