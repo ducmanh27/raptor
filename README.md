@@ -226,6 +226,79 @@ I (158356) wifi_broadcast: [ETH->WiFi] Broadcasting 4 bytes to all WiFi clients
 I (158366) wifi_broadcast: Broadcast complete: sent=1, failed=0, total_clients=1
 ```
 
+## Example Output When not having Ethernet TCP client
+```
+I (4646) wifi_init: Starting WiFi SoftAP...
+I (4646) main: Ethernet Started
+I (4656) wifi:wifi driver task: 3ffc5d48, prio:23, stack:6656, core=0
+I (4666) wifi:wifi firmware version: 14da9b7
+I (4666) wifi:wifi certification version: v7.0
+I (4666) wifi:config NVS flash: enabled
+I (4666) wifi:config nano formatting: disabled
+I (4666) wifi:Init data frame dynamic rx buffer num: 32
+I (4676) wifi:Init static rx mgmt buffer num: 5
+I (4676) wifi:Init management short buffer num: 32
+I (4686) wifi:Init dynamic tx buffer num: 32
+I (4686) wifi:Init static rx buffer size: 1600
+I (4686) wifi:Init static rx buffer num: 10
+I (4696) wifi:Init dynamic rx buffer num: 32
+I (4696) wifi_init: rx ba win: 6
+I (4696) wifi_init: accept mbox: 6
+I (4706) wifi_init: tcpip mbox: 32
+I (4706) wifi_init: udp mbox: 6
+I (4706) wifi_init: tcp mbox: 6
+I (4716) wifi_init: tcp tx win: 5760
+I (4716) wifi_init: tcp rx win: 5760
+I (4716) wifi_init: tcp mss: 1440
+I (4726) wifi_init: WiFi IRAM OP enabled
+I (4726) wifi_init: WiFi RX IRAM OP enabled
+I (4736) phy_init: phy_version 4861,b71b5ad,Aug  5 2025,11:16:06
+I (4806) wifi:mode : softAP (5c:01:3b:f3:fc:99)
+I (4816) wifi:Total power save buffer number: 16
+I (4816) wifi:Init max length of beacon: 752/752
+I (4816) wifi:Init max length of beacon: 752/752
+I (4816) main: WiFi AP is ready for TCP server
+I (4826) wifi_init: WiFi SoftAP started: SSID=MTB-052 channel:1
+I (4826) esp_netif_lwip: DHCP server started on interface WIFI_AP_DEF with IP: 192.168.10.1
+I (4836) eth_server: Waiting for Ethernet connection...
+I (4846) wifi_server: Waiting for WiFi AP to start...
+I (4846) wifi_broadcast: WiFi broadcast task started
+I (4846) main: ===========================================
+I (4856) main: Bridge/Gateway initialized successfully
+I (4856) main: Ethernet: 192.168.49.53:8888
+I (4866) main: WiFi AP:  192.168.10.1:9999
+I (4866) main: ===========================================
+I (4876) main_task: Returned from app_main()
+I (5346) wifi_server: WiFi AP ready! Starting TCP server...
+I (5346) wifi_server: Socket bound to 192.168.10.1:9999
+I (5346) wifi_server: WiFi TCP Server listening on 192.168.10.1:9999
+I (16216) wifi:new:<1,1>, old:<1,1>, ap:<1,1>, sta:<255,255>, prof:1, snd_ch_cfg:0x0
+I (16216) wifi:station: e0:2e:0b:92:f9:41 join, AID=1, bgn, 40U
+I (16246) wifi_init: station e0:2e:0b:92:f9:41 join, AID=1
+I (16526) wifi:<ba-add>idx:2 (ifx:1, e0:2e:0b:92:f9:41), tid:0, ssn:21, winSize:64
+I (16576) esp_netif_lwip: DHCP server assigned IP to a client, IP is: 192.168.10.2
+I (30526) wifi_server: New WiFi client connected from: 192.168.10.2
+I (30526) bridge: WiFi client registered: socket=55, slot=0, total=1
+I (30526) wifi_client: WiFi client handler started for socket 55
+I (32326) wifi_client: [WiFi->ETH] Received 100 bytes: XXXYYZZZAXXXYYZZZAXXXYYZZZAXXXYYZZZAXXXYYZZZAXXXYYZZZAXXXYYZZZAXXXYYZZZAXXXYYZZZAXXXYXXXYYZZ1ZAYZZZA
+I (32866) wifi_client: [WiFi->ETH] Received 100 bytes: XXXYYZZZAXXXYYZZZAXXXYYZZZAXXXYYZZZAXXXYYZZZAXXXYYZZZAXXXYYZZZAXXXYYZZZAXXXYYZZZAXXXYXXXYYZZ1ZAYZZZA
+I (33376) wifi_client: [WiFi->ETH] Received 100 bytes: XXXYYZZZAXXXYYZZZAXXXYYZZZAXXXYYZZZAXXXYYZZZAXXXYYZZZAXXXYYZZZAXXXYYZZZAXXXYYZZZAXXXYXXXYYZZ1ZAYZZZA
+I (33866) wifi_client: [WiFi->ETH] Received 100 bytes: XXXYYZZZAXXXYYZZZAXXXYYZZZAXXXYYZZZAXXXYYZZZAXXXYYZZZAXXXYYZZZAXXXYYZZZAXXXYYZZZAXXXYXXXYYZZ1ZAYZZZA
+W (33866) bridge: Queue WiFi->Eth full: dropped oldest message (100 bytes), keeping newest
+I (36456) wifi_client: [WiFi->ETH] Received 100 bytes: XXXYYZZZAXXXYYZZZAXXXYYZZZAXXXYYZZZAXXXYYZZZAXXXYYZZZAXXXYYZZZAXXXYYZZZAXXXYYZZZAXXXYXXXYYZZ1ZAYZZZA
+W (36456) bridge: Queue WiFi->Eth full: dropped oldest message (100 bytes), keeping newest
+I (37096) wifi_client: [WiFi->ETH] Received 100 bytes: XXXYYZZZAXXXYYZZZAXXXYYZZZAXXXYYZZZAXXXYYZZZAXXXYYZZZAXXXYYZZZAXXXYYZZZAXXXYYZZZAXXXYXXXYYZZ1ZAYZZZA
+W (37096) bridge: Queue WiFi->Eth full: dropped oldest message (100 bytes), keeping newest
+I (37376) wifi_client: [WiFi->ETH] Received 100 bytes: XXXYYZZZAXXXYYZZZAXXXYYZZZAXXXYYZZZAXXXYYZZZAXXXYYZZZAXXXYYZZZAXXXYYZZZAXXXYYZZZAXXXYXXXYYZZ1ZAYZZZA
+W (37376) bridge: Queue WiFi->Eth full: dropped oldest message (100 bytes), keeping newest
+I (37596) wifi_client: [WiFi->ETH] Received 100 bytes: XXXYYZZZAXXXYYZZZAXXXYYZZZAXXXYYZZZAXXXYYZZZAXXXYYZZZAXXXYYZZZAXXXYYZZZAXXXYYZZZAXXXYXXXYYZZ1ZAYZZZA
+W (37606) bridge: Queue WiFi->Eth full: dropped oldest message (100 bytes), keeping newest
+I (37806) wifi_client: [WiFi->ETH] Received 100 bytes: XXXYYZZZAXXXYYZZZAXXXYYZZZAXXXYYZZZAXXXYYZZZAXXXYYZZZAXXXYYZZZAXXXYYZZZAXXXYYZZZAXXXYXXXYYZZ1ZAYZZZA
+W (37806) bridge: Queue WiFi->Eth full: dropped oldest message (100 bytes), keeping newest
+I (38106) wifi_client: [WiFi->ETH] Received 200 bytes: XXXYYZZZAXXXYYZZZAXXXYYZZZAXXXYYZZZAXXXYYZZZAXXXYYZZZAXXXYYZZZAXXXYYZZZAXXXYYZZZAXXXYXXXYYZZ1ZAYZZZAXXXYYZZZAXXXYYZZZAXXXYYZZZAXXXYYZZZAXXXYYZZZAXXXYYZZZAXXXYYZZZAXXXYYZZZAXXXYYZZZAXXXYXXXYYZZ1ZAYZZZA
+W (38126) bridge: Queue WiFi->Eth full: dropped oldest message (100 bytes), keeping newest
+```
+
 ## Performance Characteristics
 
 - **Latency**: < 5ms for small packets
