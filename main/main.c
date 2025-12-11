@@ -94,43 +94,6 @@ static void got_ip_event_handler(void *arg, esp_event_base_t event_base,
     xEventGroupSetBits(eth_event_group, ETH_CONNECTED_BIT);
 }
 
-// ========== ETHERNET RX TASK (Nhận từ Ethernet Client) ==========
-static void ethernet_rx_task(void *pvParameters) {
-    int sock = (int)pvParameters;
-    char rx_buffer[256];
-    const char *TASK_TAG = "eth_rx";
-    
-    ESP_LOGI(TASK_TAG, "Ethernet RX task started for socket %d", sock);
-    
-    while (1) {
-        int len = recv(sock, rx_buffer, sizeof(rx_buffer) - 1, 0);
-        
-        if (len < 0) {
-            ESP_LOGE(TASK_TAG, "recv failed: errno %d", errno);
-            break;
-        }
-        
-        if (len == 0) {
-            ESP_LOGI(TASK_TAG, "Ethernet client disconnected");
-            break;
-        }
-        
-        rx_buffer[len] = 0;
-        ESP_LOGI(TASK_TAG, "[ETH->WiFi] Received %d bytes: %s", len, rx_buffer);
-        
-        // Gửi vào queue để broadcast đến WiFi clients
-        if (bridge_send_to_wifi(&g_bridge, (uint8_t*)rx_buffer, len, sock) != 0) {
-            ESP_LOGW(TASK_TAG, "Failed to send to WiFi queue");
-        }
-    }
-    
-    // Cleanup
-    bridge_clear_ethernet_client(&g_bridge);
-    close(sock);
-    ESP_LOGI(TASK_TAG, "Ethernet RX task ended");
-    vTaskDelete(NULL);
-}
-
 // ========== ETHERNET TX TASK (Gửi đến Ethernet Client) ==========
 static void ethernet_tx_task(void *pvParameters) {
     int sock = (int)pvParameters;
@@ -250,20 +213,50 @@ static void tcp_server_ethernet_task(void *pvParameters)
 
         ESP_LOGI(TASK_TAG, "Ethernet client connected from: %s", addr_str);
         
-        // Đăng ký Ethernet client
         bridge_set_ethernet_client(&g_bridge, sock);
         
-        // Tạo 2 tasks: RX và TX
-        xTaskCreate(ethernet_rx_task, "eth_rx", 4096, (void*)sock, 5, NULL);
-        xTaskCreate(ethernet_tx_task, "eth_tx", 4096, (void*)sock, 5, NULL);
+        TaskHandle_t tx_task_handle = NULL;
         
-        // Đợi client disconnect (các task sẽ tự cleanup)
-        // Server sẽ close listen socket và chờ client mới
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        xTaskCreate(ethernet_tx_task, "eth_tx", 4096, (void*)sock, 5, &tx_task_handle);
+        
+        char rx_buffer[256];
+        while (1) {
+            int len = recv(sock, rx_buffer, sizeof(rx_buffer) - 1, 0);
+            
+            if (len < 0) {
+                ESP_LOGE(TASK_TAG, "recv failed: errno %d", errno);
+                break;
+            }
+            
+            if (len == 0) {
+                ESP_LOGI(TASK_TAG, "Ethernet client disconnected");
+                break;
+            }
+            
+            rx_buffer[len] = 0;
+            ESP_LOGI(TASK_TAG, "[ETH->WiFi] Received %d bytes: %s", len, rx_buffer);
+            
+            if (bridge_send_to_wifi(&g_bridge, (uint8_t*)rx_buffer, len, sock) != 0) {
+                ESP_LOGW(TASK_TAG, "Failed to send to WiFi queue");
+            }
+        }
+        
+        ESP_LOGI(TASK_TAG, "Cleaning up client connection...");
+
+        close(sock);
+        
+        // Delele TX task
+        if (tx_task_handle != NULL) {
+            vTaskDelete(tx_task_handle);
+            tx_task_handle = NULL;
+        }
+        
+        bridge_clear_ethernet_client(&g_bridge);
         
         close(listen_sock);
-        ESP_LOGI(TASK_TAG, "Ethernet client disconnected, waiting for new connection...");
-        vTaskDelay(pdMS_TO_TICKS(2000));
+        
+        ESP_LOGI(TASK_TAG, "Client disconnected, restarting server...");
+        vTaskDelay(pdMS_TO_TICKS(1000));
     }
     
     vTaskDelete(NULL);
