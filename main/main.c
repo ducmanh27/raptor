@@ -217,9 +217,9 @@ static void tcp_server_ethernet_task(void *pvParameters)
         
         TaskHandle_t tx_task_handle = NULL;
         
-        xTaskCreate(ethernet_tx_task, "eth_tx", 4096, (void*)sock, 5, &tx_task_handle);
+        xTaskCreate(ethernet_tx_task, "eth_tx", 8192, (void*)sock, 5, &tx_task_handle);
         
-        char rx_buffer[256];
+        char rx_buffer[MAX_MESSAGE_DATA_SIZE];
         while (1) {
             int len = recv(sock, rx_buffer, sizeof(rx_buffer) - 1, 0);
             
@@ -265,7 +265,7 @@ static void tcp_server_ethernet_task(void *pvParameters)
 // ========== WIFI CLIENT HANDLER TASK ==========
 static void wifi_client_handler_task(void *pvParameters) {
     int sock = (int)pvParameters;
-    char rx_buffer[256];
+    char rx_buffer[MAX_MESSAGE_DATA_SIZE];
     const char *TASK_TAG = "wifi_client";
     int keepAlive = 1;
     
