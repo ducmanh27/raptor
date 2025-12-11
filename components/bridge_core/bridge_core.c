@@ -45,9 +45,25 @@ int bridge_send_to_ethernet(bridge_state_t *bridge, uint8_t *data, uint16_t len,
     msg.source_sock = source_sock;
     msg.source = FROM_WIFI;
     
-    if (xQueueSend(bridge->queue_wifi_to_eth, &msg, pdMS_TO_TICKS(QUEUE_TIMEOUT_MS)) != pdTRUE) {
-        ESP_LOGW(TAG, "Queue WiFi->Eth is full, message dropped");
-        return -1;
+    // Try to send with timeout
+    // NOTE: Chỉnh timeout xuống 0 đảm bảo tính real-time trong trường hợp đầy thì bỏ 1 msg cũ nhất đi.
+    if (xQueueSend(bridge->queue_wifi_to_eth, &msg, 0) != pdTRUE) {
+        // Queue is full - evict oldest message and insert new one
+        bridge_message_t discarded_msg;
+        // TODO: CÓ NÊN DROP NHIỀU MSG CŨ CÙNG LÚC K ? 
+        if (xQueueReceive(bridge->queue_wifi_to_eth, &discarded_msg, 0) == pdTRUE) {
+            ESP_LOGW(TAG, "Queue WiFi->Eth full: dropped oldest message (%d bytes), keeping newest", 
+                     discarded_msg.len);
+            
+            // Now send the new message (should succeed since we just freed a slot)
+            if (xQueueSend(bridge->queue_wifi_to_eth, &msg, 0) != pdTRUE) {
+                ESP_LOGE(TAG, "Failed to send after eviction - should not happen!");
+                return -1;
+            }
+        } else {
+            ESP_LOGE(TAG, "Queue full but cannot receive - should not happen!");
+            return -1;
+        }
     }
     
     ESP_LOGD(TAG, "Sent %d bytes from WiFi to Ethernet queue", len);
@@ -66,9 +82,24 @@ int bridge_send_to_wifi(bridge_state_t *bridge, uint8_t *data, uint16_t len, int
     msg.source_sock = source_sock;
     msg.source = FROM_ETHERNET;
     
-    if (xQueueSend(bridge->queue_eth_to_wifi, &msg, pdMS_TO_TICKS(QUEUE_TIMEOUT_MS)) != pdTRUE) {
-        ESP_LOGW(TAG, "Queue Eth->WiFi is full, message dropped");
-        return -1;
+    // Try to send with no timeout (non-blocking)
+    if (xQueueSend(bridge->queue_eth_to_wifi, &msg, 0) != pdTRUE) {
+        // Queue is full - evict oldest message and insert new one
+        bridge_message_t discarded_msg;
+        
+        if (xQueueReceive(bridge->queue_eth_to_wifi, &discarded_msg, 0) == pdTRUE) {
+            ESP_LOGW(TAG, "Queue Eth->WiFi full: dropped oldest message (%d bytes), keeping newest", 
+                     discarded_msg.len);
+            
+            // Now send the new message (should succeed since we just freed a slot)
+            if (xQueueSend(bridge->queue_eth_to_wifi, &msg, 0) != pdTRUE) {
+                ESP_LOGE(TAG, "Failed to send after eviction - should not happen!");
+                return -1;
+            }
+        } else {
+            ESP_LOGE(TAG, "Queue full but cannot receive - should not happen!");
+            return -1;
+        }
     }
     
     ESP_LOGD(TAG, "Sent %d bytes from Ethernet to WiFi queue", len);
