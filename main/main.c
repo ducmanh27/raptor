@@ -39,7 +39,7 @@
 
 #define BUF_SIZE (1024)
 #define RD_BUF_SIZE (BUF_SIZE)
-static QueueHandle_t uart0_queue;
+static QueueHandle_t uart2_queue;
 
 static const char *TAG = "main";
 
@@ -114,7 +114,7 @@ static void ethernet_tx_task(void *pvParameters) {
     while (1) {
         // Đợi message từ WiFi
         if (xQueueReceive(g_bridge.queue_wifi_to_eth, &msg, portMAX_DELAY) == pdTRUE) {
-            ESP_LOGI(TASK_TAG, "[WiFi->ETH] Forwarding %d bytes to Ethernet client", msg.len);
+            ESP_LOGD(TASK_TAG, "[WiFi->ETH] Forwarding %d bytes to Ethernet client", msg.len);
             
             // Gửi đến Ethernet client
             int to_write = msg.len;
@@ -132,7 +132,7 @@ static void ethernet_tx_task(void *pvParameters) {
                 ptr += written;
             }
             
-            ESP_LOGI(TASK_TAG, "Successfully sent %d bytes to Ethernet client", msg.len);
+            ESP_LOGD(TASK_TAG, "Successfully sent %d bytes to Ethernet client", msg.len);
         }
     }
     
@@ -243,7 +243,7 @@ static void tcp_server_ethernet_task(void *pvParameters)
             }
             
             rx_buffer[len] = 0;
-            ESP_LOGI(TASK_TAG, "[ETH->WiFi] Received %d bytes: %s", len, rx_buffer);
+            ESP_LOGD(TASK_TAG, "[ETH->WiFi] Received %d bytes: %s", len, rx_buffer);
             
             if (bridge_send_to_wifi(&g_bridge, (uint8_t*)rx_buffer, len, sock) != 0) {
                 ESP_LOGW(TASK_TAG, "Failed to send to WiFi queue");
@@ -304,7 +304,7 @@ static void wifi_client_handler_task(void *pvParameters) {
         }
 
         rx_buffer[len] = 0;
-        ESP_LOGI(TASK_TAG, "[WiFi->ETH] Received %d bytes: %s", len, rx_buffer);
+        ESP_LOGD(TASK_TAG, "[WiFi->ETH] Received %d bytes: %s", len, rx_buffer);
         
         // Gửi vào queue để forward đến Ethernet
         if (bridge_send_to_ethernet(&g_bridge, (uint8_t*)rx_buffer, len, sock) != 0) {
@@ -329,7 +329,7 @@ static void wifi_broadcast_task(void *pvParameters) {
     while (1) {
         // Đợi message từ Ethernet
         if (xQueueReceive(g_bridge.queue_eth_to_wifi, &msg, portMAX_DELAY) == pdTRUE) {
-            ESP_LOGI(TASK_TAG, "[ETH->WiFi] Broadcasting %d bytes to all WiFi clients", msg.len);
+            ESP_LOGD(TASK_TAG, "[ETH->WiFi] Broadcasting %d bytes to all WiFi clients", msg.len);
             
             // Lấy mutex để access client list
             if (xSemaphoreTake(g_bridge.wifi_clients.mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
@@ -364,7 +364,7 @@ static void wifi_broadcast_task(void *pvParameters) {
                 
                 xSemaphoreGive(g_bridge.wifi_clients.mutex);
                 
-                ESP_LOGI(TASK_TAG, "Broadcast complete: sent=%d, failed=%d, total_clients=%d", 
+                ESP_LOGD(TASK_TAG, "Broadcast complete: sent=%d, failed=%d, total_clients=%d", 
                          sent_count, failed_count, g_bridge.wifi_clients.count);
             } else {
                 ESP_LOGW(TASK_TAG, "Failed to acquire mutex for broadcast");
@@ -486,7 +486,7 @@ static void uart_event_with_at_parser_task(void *pvParameters)
     assert(dtmp);
     for (;;) {
         //Waiting for UART event.
-        if (xQueueReceive(uart0_queue, (void *)&event, (TickType_t)portMAX_DELAY)) {
+        if (xQueueReceive(uart2_queue, (void *)&event, (TickType_t)portMAX_DELAY)) {
             bzero(dtmp, RD_BUF_SIZE);
             ESP_LOGI(TAG, "uart[%d] event:", EX_UART_NUM);
             switch (event.type) {
@@ -514,7 +514,7 @@ static void uart_event_with_at_parser_task(void *pvParameters)
                 // As an example, we directly flush the rx buffer here in order to read more data.
                 uart_flush_input(EX_UART_NUM);
                 at_parser_init(&parser);
-                xQueueReset(uart0_queue);
+                xQueueReset(uart2_queue);
                 break;
             //Event of UART ring buffer full
             case UART_BUFFER_FULL:
@@ -522,7 +522,7 @@ static void uart_event_with_at_parser_task(void *pvParameters)
                 // If buffer full happened, you should consider increasing your buffer size
                 // As an example, we directly flush the rx buffer here in order to read more data.
                 uart_flush_input(EX_UART_NUM);
-                xQueueReset(uart0_queue);
+                xQueueReset(uart2_queue);
                 at_parser_init(&parser);
                 break;
             //Event of UART RX break detected
@@ -571,6 +571,7 @@ static void uart_event_with_at_parser_task(void *pvParameters)
 // ========== APP MAIN ==========
 void app_main(void)
 {
+    esp_log_level_set("*", ESP_LOG_INFO);
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());
@@ -646,7 +647,7 @@ void app_main(void)
         .source_clk = UART_SCLK_DEFAULT,
     };
     //Install UART driver, and get the queue.
-    uart_driver_install(EX_UART_NUM, BUF_SIZE * 2, BUF_SIZE * 2, 20, &uart0_queue, 0);
+    uart_driver_install(EX_UART_NUM, BUF_SIZE * 2, BUF_SIZE * 2, 20, &uart2_queue, 0);
     uart_param_config(EX_UART_NUM, &uart_config);
 
     uart_set_pin(EX_UART_NUM, 17, 5, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
