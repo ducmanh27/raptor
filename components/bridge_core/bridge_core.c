@@ -50,7 +50,6 @@ int bridge_send_to_ethernet(bridge_state_t *bridge, uint8_t *data, uint16_t len,
     if (xQueueSend(bridge->queue_wifi_to_eth, &msg, 0) != pdTRUE) {
         // Queue is full - evict oldest message and insert new one
         bridge_message_t discarded_msg;
-        // TODO: CÓ NÊN DROP NHIỀU MSG CŨ CÙNG LÚC K ? 
         if (xQueueReceive(bridge->queue_wifi_to_eth, &discarded_msg, 0) == pdTRUE) {
             ESP_LOGW(TAG, "Queue WiFi->Eth full: dropped oldest message (%d bytes), keeping newest", 
                      discarded_msg.len);

@@ -39,7 +39,7 @@
 
 #define BUF_SIZE (1024)
 #define RD_BUF_SIZE (BUF_SIZE)
-static QueueHandle_t uart0_queue;
+static QueueHandle_t uart2_queue;
 
 static const char *TAG = "main";
 
@@ -114,7 +114,7 @@ static void ethernet_tx_task(void *pvParameters) {
     while (1) {
         // Đợi message từ WiFi
         if (xQueueReceive(g_bridge.queue_wifi_to_eth, &msg, portMAX_DELAY) == pdTRUE) {
-            ESP_LOGI(TASK_TAG, "[WiFi->ETH] Forwarding %d bytes to Ethernet client", msg.len);
+            ESP_LOGD(TASK_TAG, "[WiFi->ETH] Forwarding %d bytes to Ethernet client", msg.len);
             
             // Gửi đến Ethernet client
             int to_write = msg.len;
@@ -132,7 +132,7 @@ static void ethernet_tx_task(void *pvParameters) {
                 ptr += written;
             }
             
-            ESP_LOGI(TASK_TAG, "Successfully sent %d bytes to Ethernet client", msg.len);
+            ESP_LOGD(TASK_TAG, "Successfully sent %d bytes to Ethernet client", msg.len);
         }
     }
     
@@ -152,7 +152,8 @@ static void tcp_server_ethernet_task(void *pvParameters)
     int keepIdle = KEEPALIVE_IDLE;
     int keepInterval = KEEPALIVE_INTERVAL;
     int keepCount = KEEPALIVE_COUNT;
-    
+    int nodelay = 1;
+
     ESP_LOGI(TASK_TAG, "Waiting for Ethernet connection...");
     xEventGroupWaitBits(eth_event_group, ETH_CONNECTED_BIT, false, true, portMAX_DELAY);
     ESP_LOGI(TASK_TAG, "Ethernet connected! Starting TCP server...");
@@ -177,7 +178,7 @@ static void tcp_server_ethernet_task(void *pvParameters)
         
         int opt = 1;
         setsockopt(listen_sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-
+        
         int err = bind(listen_sock, (struct sockaddr *)&dest_addr, sizeof(dest_addr));
         if (err != 0) {
             ESP_LOGE(TASK_TAG, "Socket unable to bind: errno %d", errno);
@@ -215,6 +216,7 @@ static void tcp_server_ethernet_task(void *pvParameters)
         setsockopt(sock, IPPROTO_TCP, TCP_KEEPIDLE, &keepIdle, sizeof(int));
         setsockopt(sock, IPPROTO_TCP, TCP_KEEPINTVL, &keepInterval, sizeof(int));
         setsockopt(sock, IPPROTO_TCP, TCP_KEEPCNT, &keepCount, sizeof(int));
+        setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(int));
 
         if (source_addr.ss_family == PF_INET) {
             inet_ntoa_r(((struct sockaddr_in *)&source_addr)->sin_addr, addr_str, sizeof(addr_str) - 1);
@@ -243,7 +245,7 @@ static void tcp_server_ethernet_task(void *pvParameters)
             }
             
             rx_buffer[len] = 0;
-            ESP_LOGI(TASK_TAG, "[ETH->WiFi] Received %d bytes: %s", len, rx_buffer);
+            ESP_LOGD(TASK_TAG, "[ETH->WiFi] Received %d bytes: %s", len, rx_buffer);
             
             if (bridge_send_to_wifi(&g_bridge, (uint8_t*)rx_buffer, len, sock) != 0) {
                 ESP_LOGW(TASK_TAG, "Failed to send to WiFi queue");
@@ -277,8 +279,16 @@ static void wifi_client_handler_task(void *pvParameters) {
     char rx_buffer[MAX_MESSAGE_DATA_SIZE];
     const char *TASK_TAG = "wifi_client";
     int keepAlive = 1;
-    
+    int keepIdle = KEEPALIVE_IDLE;
+    int keepInterval = KEEPALIVE_INTERVAL;
+    int keepCount = KEEPALIVE_COUNT;
+    int nodelay = 1;
+
     setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, &keepAlive, sizeof(int));
+    setsockopt(sock, IPPROTO_TCP, TCP_KEEPIDLE, &keepIdle, sizeof(int));
+    setsockopt(sock, IPPROTO_TCP, TCP_KEEPINTVL, &keepInterval, sizeof(int));
+    setsockopt(sock, IPPROTO_TCP, TCP_KEEPCNT, &keepCount, sizeof(int));
+    setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(int));
     
     // Đăng ký client vào bridge
     if (bridge_register_wifi_client(&g_bridge, sock) != 0) {
@@ -304,7 +314,7 @@ static void wifi_client_handler_task(void *pvParameters) {
         }
 
         rx_buffer[len] = 0;
-        ESP_LOGI(TASK_TAG, "[WiFi->ETH] Received %d bytes: %s", len, rx_buffer);
+        ESP_LOGD(TASK_TAG, "[WiFi->ETH] Received %d bytes: %s", len, rx_buffer);
         
         // Gửi vào queue để forward đến Ethernet
         if (bridge_send_to_ethernet(&g_bridge, (uint8_t*)rx_buffer, len, sock) != 0) {
@@ -329,7 +339,7 @@ static void wifi_broadcast_task(void *pvParameters) {
     while (1) {
         // Đợi message từ Ethernet
         if (xQueueReceive(g_bridge.queue_eth_to_wifi, &msg, portMAX_DELAY) == pdTRUE) {
-            ESP_LOGI(TASK_TAG, "[ETH->WiFi] Broadcasting %d bytes to all WiFi clients", msg.len);
+            ESP_LOGD(TASK_TAG, "[ETH->WiFi] Broadcasting %d bytes to all WiFi clients", msg.len);
             
             // Lấy mutex để access client list
             if (xSemaphoreTake(g_bridge.wifi_clients.mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
@@ -364,7 +374,7 @@ static void wifi_broadcast_task(void *pvParameters) {
                 
                 xSemaphoreGive(g_bridge.wifi_clients.mutex);
                 
-                ESP_LOGI(TASK_TAG, "Broadcast complete: sent=%d, failed=%d, total_clients=%d", 
+                ESP_LOGD(TASK_TAG, "Broadcast complete: sent=%d, failed=%d, total_clients=%d", 
                          sent_count, failed_count, g_bridge.wifi_clients.count);
             } else {
                 ESP_LOGW(TASK_TAG, "Failed to acquire mutex for broadcast");
@@ -384,6 +394,7 @@ static void tcp_server_wifi_task(void *pvParameters)
     int keepIdle = KEEPALIVE_IDLE;
     int keepInterval = KEEPALIVE_INTERVAL;
     int keepCount = KEEPALIVE_COUNT;
+    int nodelay = 1;
 
     const char *TASK_TAG = "wifi_server";
     
@@ -413,7 +424,7 @@ static void tcp_server_wifi_task(void *pvParameters)
         
         int opt = 1;
         setsockopt(listen_sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-
+        
         int err = bind(listen_sock, (struct sockaddr *)&dest_addr, sizeof(dest_addr));
         if (err != 0) {
             ESP_LOGE(TASK_TAG, "Socket unable to bind: errno %d", errno);
@@ -444,13 +455,14 @@ static void tcp_server_wifi_task(void *pvParameters)
                 ESP_LOGE(TASK_TAG, "accept failed: errno %d", errno);
                 break;
             }
-
+            
             // Set keepalive
             setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, &keepAlive, sizeof(int));
             setsockopt(sock, IPPROTO_TCP, TCP_KEEPIDLE, &keepIdle, sizeof(int));
             setsockopt(sock, IPPROTO_TCP, TCP_KEEPINTVL, &keepInterval, sizeof(int));
             setsockopt(sock, IPPROTO_TCP, TCP_KEEPCNT, &keepCount, sizeof(int));
-            
+            setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(int));
+
             char addr_str[128];
             if (source_addr.ss_family == PF_INET) {
                 inet_ntoa_r(((struct sockaddr_in *)&source_addr)->sin_addr, 
@@ -486,7 +498,7 @@ static void uart_event_with_at_parser_task(void *pvParameters)
     assert(dtmp);
     for (;;) {
         //Waiting for UART event.
-        if (xQueueReceive(uart0_queue, (void *)&event, (TickType_t)portMAX_DELAY)) {
+        if (xQueueReceive(uart2_queue, (void *)&event, (TickType_t)portMAX_DELAY)) {
             bzero(dtmp, RD_BUF_SIZE);
             ESP_LOGI(TAG, "uart[%d] event:", EX_UART_NUM);
             switch (event.type) {
@@ -514,7 +526,7 @@ static void uart_event_with_at_parser_task(void *pvParameters)
                 // As an example, we directly flush the rx buffer here in order to read more data.
                 uart_flush_input(EX_UART_NUM);
                 at_parser_init(&parser);
-                xQueueReset(uart0_queue);
+                xQueueReset(uart2_queue);
                 break;
             //Event of UART ring buffer full
             case UART_BUFFER_FULL:
@@ -522,7 +534,7 @@ static void uart_event_with_at_parser_task(void *pvParameters)
                 // If buffer full happened, you should consider increasing your buffer size
                 // As an example, we directly flush the rx buffer here in order to read more data.
                 uart_flush_input(EX_UART_NUM);
-                xQueueReset(uart0_queue);
+                xQueueReset(uart2_queue);
                 at_parser_init(&parser);
                 break;
             //Event of UART RX break detected
@@ -537,26 +549,6 @@ static void uart_event_with_at_parser_task(void *pvParameters)
             case UART_FRAME_ERR:
                 ESP_LOGI(TAG, "uart frame error");
                 break;
-            //UART_PATTERN_DET
-            // case UART_PATTERN_DET:
-            //     uart_get_buffered_data_len(EX_UART_NUM, &buffered_size);
-            //     int pos = uart_pattern_pop_pos(EX_UART_NUM);
-            //     ESP_LOGI(TAG, "[UART PATTERN DETECTED] pos: %d, buffered size: %d", pos, buffered_size);
-            //     if (pos == -1) {
-            //         // There used to be a UART_PATTERN_DET event, but the pattern position queue is full so that it can not
-            //         // record the position. We should set a larger queue size.
-            //         // As an example, we directly flush the rx buffer here.
-            //         uart_flush_input(EX_UART_NUM);
-            //     } else {
-            //         uart_read_bytes(EX_UART_NUM, dtmp, pos, 100 / portTICK_PERIOD_MS);
-            //         uint8_t pat[PATTERN_CHR_NUM + 1];
-            //         memset(pat, 0, sizeof(pat));
-            //         uart_read_bytes(EX_UART_NUM, pat, PATTERN_CHR_NUM, 100 / portTICK_PERIOD_MS);
-            //         ESP_LOGI(TAG, "read data: %s", dtmp);
-            //         ESP_LOGI(TAG, "read pat : %s", pat);
-            //     }
-            //     break;
-            //Others
             default:
                 ESP_LOGI(TAG, "uart event type: %d", event.type);
                 break;
@@ -571,6 +563,7 @@ static void uart_event_with_at_parser_task(void *pvParameters)
 // ========== APP MAIN ==========
 void app_main(void)
 {
+    esp_log_level_set("*", ESP_LOG_INFO);
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());
@@ -633,7 +626,7 @@ void app_main(void)
         .netmask = WIFI_AP_NETMASK
     };
     wifi_init_softap(&wifi_config);
-
+    esp_wifi_set_max_tx_power(84);
 
     /* Configure parameters of an UART driver,
     * communication pins and install the driver */
@@ -646,21 +639,17 @@ void app_main(void)
         .source_clk = UART_SCLK_DEFAULT,
     };
     //Install UART driver, and get the queue.
-    uart_driver_install(EX_UART_NUM, BUF_SIZE * 2, BUF_SIZE * 2, 20, &uart0_queue, 0);
+    uart_driver_install(EX_UART_NUM, BUF_SIZE * 2, BUF_SIZE * 2, 20, &uart2_queue, 0);
     uart_param_config(EX_UART_NUM, &uart_config);
 
     uart_set_pin(EX_UART_NUM, 17, 5, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
 
-    uart_enable_pattern_det_baud_intr(EX_UART_NUM, '+', PATTERN_CHR_NUM, 9, 0, 0); 
-
-    // Start TCP servers
     xTaskCreate(tcp_server_ethernet_task, "tcp_eth_server", 8192, NULL, 5, NULL);
     xTaskCreate(tcp_server_wifi_task, "tcp_wifi_server", 8192, NULL, 5, NULL);
 
-    // Start broadcast task
     xTaskCreate(wifi_broadcast_task, "wifi_broadcast", 8192, NULL, 5, NULL);
 
-    //Create a task to handler UART event from ISR
+    // Create a task to handler UART event from ISR
     xTaskCreate(uart_event_with_at_parser_task, "uart_event_with_at_parser_task", 3072, NULL, 12, NULL);
 
     ESP_LOGI(TAG, "===========================================");
