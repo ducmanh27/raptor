@@ -34,7 +34,7 @@
 #include "bridge_core.h"
 #include "at_command.h"
 
-#define EX_UART_NUM UART_NUM_2
+#define AT_COMMAND_UART_NUM UART_NUM_2
 #define PATTERN_CHR_NUM    (3) 
 
 #define BUF_SIZE (1024)
@@ -500,7 +500,7 @@ static void uart_event_with_at_parser_task(void *pvParameters)
         //Waiting for UART event.
         if (xQueueReceive(uart2_queue, (void *)&event, (TickType_t)portMAX_DELAY)) {
             bzero(dtmp, RD_BUF_SIZE);
-            ESP_LOGI(TAG, "uart[%d] event:", EX_UART_NUM);
+            ESP_LOGI(TAG, "uart[%d] event:", AT_COMMAND_UART_NUM);
             switch (event.type) {
             //Event of UART receiving data
             /*We'd better handler data event fast, there would be much more data events than
@@ -508,13 +508,13 @@ static void uart_event_with_at_parser_task(void *pvParameters)
             be full.*/
             case UART_DATA:
                 // Đọc từng byte và xử lý
-                int len = uart_read_bytes(EX_UART_NUM, dtmp, event.size, portMAX_DELAY);
+                int len = uart_read_bytes(AT_COMMAND_UART_NUM, dtmp, event.size, portMAX_DELAY);
                 
                 for (int i = 0; i < len; i++) {
                     // Xử lý từng byte
                     if (at_parser_process_byte(&parser, dtmp[i], &cmd)) {
                         // Đã nhận được command hoàn chỉnh
-                        handle_command(&cmd);
+                        at_command_execute(&cmd);
                     }
                 }
                 break;
@@ -524,7 +524,7 @@ static void uart_event_with_at_parser_task(void *pvParameters)
                 // If fifo overflow happened, you should consider adding flow control for your application.
                 // The ISR has already reset the rx FIFO,
                 // As an example, we directly flush the rx buffer here in order to read more data.
-                uart_flush_input(EX_UART_NUM);
+                uart_flush_input(AT_COMMAND_UART_NUM);
                 at_parser_init(&parser);
                 xQueueReset(uart2_queue);
                 break;
@@ -533,7 +533,7 @@ static void uart_event_with_at_parser_task(void *pvParameters)
                 ESP_LOGI(TAG, "ring buffer full");
                 // If buffer full happened, you should consider increasing your buffer size
                 // As an example, we directly flush the rx buffer here in order to read more data.
-                uart_flush_input(EX_UART_NUM);
+                uart_flush_input(AT_COMMAND_UART_NUM);
                 xQueueReset(uart2_queue);
                 at_parser_init(&parser);
                 break;
@@ -639,17 +639,16 @@ void app_main(void)
         .source_clk = UART_SCLK_DEFAULT,
     };
     //Install UART driver, and get the queue.
-    uart_driver_install(EX_UART_NUM, BUF_SIZE * 2, BUF_SIZE * 2, 20, &uart2_queue, 0);
-    uart_param_config(EX_UART_NUM, &uart_config);
+    uart_driver_install(AT_COMMAND_UART_NUM, BUF_SIZE * 2, BUF_SIZE * 2, 20, &uart2_queue, 0);
+    uart_param_config(AT_COMMAND_UART_NUM, &uart_config);
 
-    uart_set_pin(EX_UART_NUM, 17, 5, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
+    uart_set_pin(AT_COMMAND_UART_NUM, 17, 5, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
 
     xTaskCreate(tcp_server_ethernet_task, "tcp_eth_server", 8192, NULL, 5, NULL);
     xTaskCreate(tcp_server_wifi_task, "tcp_wifi_server", 8192, NULL, 5, NULL);
 
     xTaskCreate(wifi_broadcast_task, "wifi_broadcast", 8192, NULL, 5, NULL);
 
-    // Create a task to handler UART event from ISR
     xTaskCreate(uart_event_with_at_parser_task, "uart_event_with_at_parser_task", 3072, NULL, 12, NULL);
 
     ESP_LOGI(TAG, "===========================================");

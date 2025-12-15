@@ -2,7 +2,7 @@
 #define NETWORK_CONFIG_H
 
 // ============ ETHERNET CONFIG ============
-#define ETH_STATIC_IP      "192.168.24.53"
+#define ETH_STATIC_IP      "192.168.24.249"
 #define ETH_NETMASK        "255.255.255.0"
 #define ETH_GATEWAY        "192.168.24.1"
 #define ETH_TCP_PORT       8888

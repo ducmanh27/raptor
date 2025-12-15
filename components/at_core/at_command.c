@@ -3,8 +3,12 @@
 #include <string.h>
 #include <ctype.h>
 #include <stdio.h>
+
 #include "at_command.h"
+#include "at_command_table.h"
+
 #include "esp_log.h"
+#include "at_command_table.h"
 
 static const char *TAG = "at_command";
 
@@ -169,20 +173,41 @@ bool at_parse_command(const char *cmd_str, at_command_t *cmd) {
     return true;
 }
 
-/* ==================== USAGE EXAMPLE ==================== */
 
-// Hàm xử lý lệnh của bạn
-void handle_command(at_command_t *cmd) {
-    ESP_LOGI(TAG, "=== AT Command Received ===");
-    ESP_LOGI(TAG, "Command: %s", cmd->cmd);
-    ESP_LOGI(TAG, "Type: ");
-    
-    switch(cmd->type) {
-        case AT_CMD_TYPE_TEST:
-            ESP_LOGI(TAG, "Type: TEST (=?)");
-            break;
+const at_command_info_t* find_command_infor(char *cmd)
+{
+	const at_command_entry_t *command_entry = command_entry_talbe;
+	while (command_entry->command_info != NULL)
+	{
+		if (strcmp(command_entry->name, cmd) == 0)
+		{
+			 return command_entry->command_info;
+		}
+
+		command_entry++;
+	}
+	return NULL;
+
+}
+
+void at_command_execute(at_command_t *cmd)
+{
+	const at_command_info_t *command_infor = find_command_infor(cmd->cmd);
+
+    char *argv[AT_CMD_MAX_LENGTH];
+    uint8_t arg_num = cmd->param_count;
+    for (int i = 0; i < arg_num; i++)
+    {
+        argv[i] = cmd->params[i];
+    }
+
+	if (command_infor != NULL)
+	{
+        switch(cmd->type) {
         case AT_CMD_TYPE_QUERY:
             ESP_LOGI(TAG,"QUERY (?)");
+            if (command_infor->function_query)
+                command_infor->function_query(argv, arg_num);
             break;
         case AT_CMD_TYPE_SET:
             ESP_LOGI(TAG, "SET (=<params>)");
@@ -190,38 +215,21 @@ void handle_command(at_command_t *cmd) {
             for (int i = 0; i < cmd->param_count; i++) {
                 ESP_LOGI(TAG, "  [%d]: %s", i, cmd->params[i]);
             }
+            if (command_infor->function_set)
+                command_infor->function_set(argv, arg_num);
             break;
         case AT_CMD_TYPE_EXECUTE:
             ESP_LOGI(TAG,"EXECUTE");
+            if (command_infor->function_execute)
+                command_infor->function_execute(argv, arg_num);
             break;
-    }
-    
-    // Xử lý từng lệnh cụ thể
-    if (strcmp(cmd->cmd, "GMR") == 0) {
-        // Trả về phiên bản firmware
-        ESP_LOGI(TAG, "Response: AT version:1.0.0.0\n");
-    }
-    else if (strcmp(cmd->cmd, "CIPMUX") == 0) {
-        if (cmd->type == AT_CMD_TYPE_QUERY) {
-            // Trả về giá trị hiện tại
-            ESP_LOGI(TAG,"Response: +CIPMUX:0");
+        default:
+            break;
         }
-        else if (cmd->type == AT_CMD_TYPE_SET && cmd->param_count == 1) {
-            // Set giá trị mới
-            ESP_LOGI(TAG,"Setting CIPMUX to %s\n", cmd->params[0]);
-            ESP_LOGI(TAG,"Response: OK\n");
-        }
-    }
-    else if (strcmp(cmd->cmd, "CIPSTART") == 0) {
-        if (cmd->type == AT_CMD_TYPE_SET && cmd->param_count >= 3) {
-            ESP_LOGI(TAG,"Connecting to %s %s:%s", 
-                   cmd->params[0],  // TCP/UDP
-                   cmd->params[1],  // IP
-                   cmd->params[2]); // Port
-            ESP_LOGI(TAG,"Response: CONNECT OK");
-        }
-    }
-    
-    ESP_LOGI(TAG,"===========================");
-}
+	}
+	else
+	{
+		ESP_LOGE(TAG, "Command %s not found", cmd->cmd);
+	}
 
+}

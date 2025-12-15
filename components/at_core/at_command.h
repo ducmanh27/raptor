@@ -43,6 +43,6 @@ bool at_parser_process_byte(at_parser_state_t *parser, uint8_t byte, at_command_
 // Parse command string thành cấu trúc at_command_t
 bool at_parse_command(const char *cmd_str, at_command_t *cmd);
 
-void handle_command(at_command_t *cmd);
+void at_command_execute(at_command_t *cmd);
 
 #endif // AT_COMMAND_H
